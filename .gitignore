@@ -1,0 +1,7 @@
+.mypy_cache/
+.qodo/
+.venv/
+__pycache__/
+
+data/
+src/__pycache__/
