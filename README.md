@@ -1,57 +1,71 @@
-# PDF Table Extraction and Merging Script
+# PDF Table Extraction Project
 
-This script extracts tables from a PDF file using [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) with PP-StructureV2, converts the extracted tables from `.xlsx` to `.csv` format, and merges all the `.csv` files into a single `.csv` file. It is designed to handle PDFs with multiple pages and multiple tables per page, making it ideal for processing documents like financial statements, reports, or invoices.
+This project extracts tables from multi-page PDF files, recognizes their structure, and extracts text using OCR. It outputs both individual CSV files for each table and a merged CSV file containing all tables.
 
 ## Features
-- **Table Extraction**: Uses PaddleOCR's PP-StructureV2 for accurate table detection and extraction.
-- **Format Conversion**: Converts extracted tables from `.xlsx` to `.csv` for easier data manipulation.
-- **Merging**: Combines all extracted tables into a single `.csv` file, preserving the order of pages and table positions.
-- **Structured Output**: Saves results in a clear directory structure for easy access.
+
+- Process multi-page PDF documents
+- Detect tables in each page using Table Transformer
+- Recognize table structure (rows and columns)
+- Extract text from cells using PaddleOCR
+- Generate CSV files for each table
+- Merge all tables into a single CSV file
+- Visualize detection and recognition results
 
 ## Requirements
-To run this script, you need the following Python packages:
-- `paddlepaddle`
-- `paddleocr`
-- `pandas`
-- `openpyxl`
 
-## Installation
-Install the required dependencies using `pip`:
+Install the required packages:
 
 ```bash
-uv sync
+pip install -r requirements.txt
 ```
 
 ## Usage
 
-**Prepare Your PDF:** Ensure you have a PDF file ready for processing.
-**Update Paths:** Modify the pdf_path and output_folder variables in the script to point to your PDF file and the desired output directory.
-**Run the Script:** Execute the script using Python:
-```shell
-python src/pdf_table_extractor.py
-```
-or
-```shell
-uv run src/pdf_table_extractor.py
+Run the main script with the path to your PDF file:
+
+```bash
+python pdf_to_csv.py --pdf_path "your_document.pdf" --output_dir "output" --visualize
 ```
 
-**Review Results:** The script will create a directory structure under the specified output_folder, containing the extracted tables in `.csv` format. The final merged `.csv` file will be saved in the output_folder as well.
+### Arguments:
 
-## Output Structure
-The script organizes the output as follows:
-```shell
-output_folder/
-    ├── <pdf_name>/
-    │   ├── [x1, y1, x2, y2]_page.xlsx  # Extracted table in Excel format
-    │   ├── [x1, y1, x2, y2]_page.csv   # Converted table in CSV format
-    │   └── ...                         # Additional tables
-    └── merged_tables.csv               # Merged CSV containing all tables
+- `--pdf_path`: Path to the PDF file (required)
+- `--output_dir`: Directory to save output files (default: "output")
+- `--detection_threshold`: Threshold for table detection (default: 0.5)
+- `--crop_padding`: Padding for table crops (default: 0)
+- `--visualize`: Save visualization images (optional flag)
+
+## Output
+
+The script creates the following directory structure:
+
 ```
-
-- `<pdf_name>/`: A subdirectory named after the input PDF (e.g., `Test_statement/`), containing individual tables in both `.xlsx` and `.csv` formats. Each file is named based on its position (`[x1, y1, x2, y2]`) and page number.
-- `merged_tables.csv`: A single CSV file in the `output_folder`, containing all extracted tables ordered by page number and position. Each table is preceded by a line indicating its source page and position (e.g., "Table from page 0, position [163, 138]").
+output/
+├── all_tables.csv                  # Merged CSV with all tables
+├── page_1/
+│   ├── page.jpg                    # Original page image
+│   ├── detected_tables.jpg         # Visualization of detected tables
+│   ├── table_1.csv                 # CSV for first table
+│   ├── table_1_structure.jpg       # Structure visualization
+│   └── table_1_rows.jpg            # Rows visualization
+├── page_2/
+│   └── ...
+└── ...
+```
 
 ## How It Works
-1. **Extraction:** The script uses PaddleOCR's PP-StructureV2 to analyze the PDF and extract tables, saving them as `.xlsx` files in a subdirectory named after the PDF.
-2. **Conversion:** Each `.xlsx` file is converted to `.csv` format and saved in the same subdirectory.
-3. **Merging:** All `.csv` files are merged into a single `merged_tables.csv` file, with each table’s data preceded by a descriptive line for easy identification.
+
+1. **PDF to Images**: Converts PDF pages to images using `pdf2image`
+2. **Table Detection**: Detects tables using Table Transformer
+3. **Structure Recognition**: Recognizes rows and columns in each table
+4. **OCR**: Extracts text from cells using PaddleOCR
+5. **CSV Generation**: Saves extracted data as CSV files
+
+## Model Credits
+
+This project uses the following models:
+
+- [microsoft/table-transformer-detection](https://huggingface.co/microsoft/table-transformer-detection) for table detection
+- [microsoft/table-structure-recognition-v1.1-all](https://huggingface.co/microsoft/table-structure-recognition-v1.1-all) for structure recognition
+- [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) for optical character recognition
