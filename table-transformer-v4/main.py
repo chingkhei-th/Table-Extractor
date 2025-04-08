@@ -474,19 +474,49 @@ class TableExtractor:
         print(f"Merged CSV saved to {merged_csv_path}")
         return merged_csv_path
 
+    # def process_pdf(self, pdf_path):
+    #     """Process a PDF file to extract tables from all pages."""
+    #     # Convert PDF to images
+    #     images = self.convert_pdf_to_images(pdf_path)
+
+    #     # Process each page
+    #     all_data = []
+
+    #     for page_idx, image in enumerate(tqdm(images, desc="Processing pages")):
+    #         page_num = page_idx + 1
+    #         print(f"\nProcessing page {page_num}/{len(images)}")
+
+    #         page_data, _ = self.process_image(image, page_num)
+    #         all_data.append(page_data)
+
+    #     # Merge all tables into a single CSV
+    #     if any(all_data):
+    #         merged_csv = self.merge_csvs(all_data, header_page=0)
+    #         print(f"Processing complete. Results saved to {self.output_dir}")
+    #         return merged_csv
+    #     else:
+    #         print("No tables were found in the PDF.")
+    #         return None
+
+    #  template-based column detection
     def process_pdf(self, pdf_path):
-        """Process a PDF file to extract tables from all pages."""
+        """Process a PDF file using first page columns as template for all pages."""
         # Convert PDF to images
         images = self.convert_pdf_to_images(pdf_path)
 
-        # Process each page
+        # First, process the first page to get column structure
+        print(f"\nProcessing first page to extract column structure template")
+        first_page = images[0]
+        template_columns = self.extract_column_template(first_page)
+
+        # Process each page with the template columns
         all_data = []
 
         for page_idx, image in enumerate(tqdm(images, desc="Processing pages")):
             page_num = page_idx + 1
             print(f"\nProcessing page {page_num}/{len(images)}")
 
-            page_data, _ = self.process_image(image, page_num)
+            page_data = self.process_image_with_template(image, page_num, template_columns)
             all_data.append(page_data)
 
         # Merge all tables into a single CSV
@@ -498,6 +528,161 @@ class TableExtractor:
             print("No tables were found in the PDF.")
             return None
 
+    def extract_column_template(self, image):
+        """Extract column structure from the first page to use as a template."""
+        # Table detection
+        pixel_values = self.detection_transform(image).unsqueeze(0).to(self.device)
+
+        with torch.no_grad():
+            outputs = self.detection_model(pixel_values)
+
+        # Extract table objects
+        objects = self.outputs_to_objects(outputs, image.size, self.detection_id2label)
+
+        if not objects:
+            print("No tables detected on first page for template")
+            return None
+
+        # Get the first table
+        table_crops = self.objects_to_crops(image, objects)
+        if not table_crops:
+            return None
+
+        # Get the cropped table image
+        cropped_table = table_crops[0]['image']
+
+        # Apply structure recognition
+        pixel_values = self.structure_transform(cropped_table).unsqueeze(0).to(self.device)
+
+        with torch.no_grad():
+            structure_outputs = self.structure_model(pixel_values)
+
+        # Extract cell structure
+        cells = self.outputs_to_objects(structure_outputs, cropped_table.size, self.structure_id2label)
+
+        # Extract just the columns and normalize their positions
+        columns = [entry for entry in cells if entry['label'] == 'table column']
+
+        if not columns:
+            print("No columns detected in the first page table")
+            return None
+
+        # Sort columns by x-coordinate
+        columns.sort(key=lambda x: x['bbox'][0])
+
+        # Get table width
+        table_width = cropped_table.width
+
+        # Normalize column positions (as ratios of table width)
+        normalized_columns = []
+        for col in columns:
+            normalized_col = {
+                'x_start_ratio': col['bbox'][0] / table_width,
+                'x_end_ratio': col['bbox'][2] / table_width,
+                'original_bbox': col['bbox']
+            }
+            normalized_columns.append(normalized_col)
+
+        return normalized_columns
+
+    def process_image_with_template(self, image, page_num, template_columns):
+        """Process a single page image using column template."""
+        if template_columns is None:
+            print(f"No column template available for page {page_num}")
+            return self.process_image(image, page_num)[0]  # Fall back to regular processing
+
+        # Save original image
+        orig_image_path = os.path.join(self.output_dir, "original", f"page_{page_num}.jpg")
+        image.save(orig_image_path)
+
+        # Table detection
+        pixel_values = self.detection_transform(image).unsqueeze(0).to(self.device)
+
+        with torch.no_grad():
+            outputs = self.detection_model(pixel_values)
+
+        # Extract table objects
+        objects = self.outputs_to_objects(outputs, image.size, self.detection_id2label)
+
+        if not objects:
+            print(f"No tables detected on page {page_num}")
+            return None
+
+        # Visualize detected tables
+        detected_image = self.visualize_detected_tables(image, objects)
+        detected_image = detected_image.convert("RGB")
+        detected_image_path = os.path.join(self.output_dir, "detected", f"page_{page_num}_detected.jpg")
+        detected_image.save(detected_image_path)
+
+        # Process each detected table
+        all_page_data = []
+
+        for table_idx, table_crop_info in enumerate(self.objects_to_crops(image, objects)):
+            # Get the cropped table image
+            cropped_table = table_crop_info['image']
+            cropped_table_path = os.path.join(self.output_dir, "cropped", f"page_{page_num}_table_{table_idx}.jpg")
+            cropped_table.save(cropped_table_path)
+
+            # Apply structure recognition just to get rows
+            pixel_values = self.structure_transform(cropped_table).unsqueeze(0).to(self.device)
+
+            with torch.no_grad():
+                structure_outputs = self.structure_model(pixel_values)
+
+            # Extract cell structure
+            cells = self.outputs_to_objects(structure_outputs, cropped_table.size, self.structure_id2label)
+
+            # Extract rows
+            rows = [entry for entry in cells if entry['label'] == 'table row']
+
+            # Sort rows by Y coordinate
+            rows.sort(key=lambda x: x['bbox'][1])
+
+            # Apply template columns to this table
+            table_width = cropped_table.width
+            template_applied_cells = []
+
+            # Add rows to cells
+            for row in rows:
+                template_applied_cells.append(row)
+
+            # Create column objects from template
+            for col in template_columns:
+                x_start = col['x_start_ratio'] * table_width
+                x_end = col['x_end_ratio'] * table_width
+
+                # Create column object
+                column_obj = {
+                    'label': 'table column',
+                    'score': 0.99,  # High confidence since it's from template
+                    'bbox': [x_start, 0, x_end, cropped_table.height]
+                }
+
+                template_applied_cells.append(column_obj)
+
+            # Visualize structure with template columns
+            structure_image = self.visualize_table_structure(cropped_table, template_applied_cells)
+            structure_image_path = os.path.join(self.output_dir, "structure", f"page_{page_num}_table_{table_idx}_structure.jpg")
+            structure_image.save(structure_image_path)
+
+            # Get cell coordinates using the template columns
+            cell_coordinates = self.get_cell_coordinates_by_row(template_applied_cells)
+
+            if not cell_coordinates:
+                print(f"No rows/columns detected in table {table_idx} on page {page_num}")
+                continue
+
+            # Apply OCR
+            table_data, table_columns = self.apply_ocr(cropped_table, cell_coordinates)
+
+            # Save individual table CSV
+            table_csv_path = os.path.join(self.output_dir, "csv", f"page_{page_num}_table_{table_idx}.csv")
+            self.save_csv(table_data, table_csv_path)
+
+            # Add to page data
+            all_page_data.append((table_data, table_columns))
+
+        return all_page_data
 
 def main():
     parser = argparse.ArgumentParser(description='Extract tables from PDF documents')
