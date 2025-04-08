@@ -4,5 +4,5 @@ class Config:
     DETECTION_THRESHOLDS = {"table": 0.5, "table rotated": 0.3, "no object": 10}
     OUTPUT_DIR = "../data/output/table-transformer-v2"
     DPI = 300
-    CROP_PADDING = 1
+    CROP_PADDING = 20
     OCR_LANG = 'en'

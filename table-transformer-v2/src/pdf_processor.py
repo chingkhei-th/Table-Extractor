@@ -335,7 +335,8 @@ class PDFProcessor:
             with open(csv_path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 for row in data.values():
-                    writer.writerow([page_num] + row)  # Add page number column
+                    # writer.writerow([page_num] + row)  # Add page number column
+                    writer.writerow(row)  # Remove page column
 
             logger.info(f"Saved CSV for page {page_num} to {csv_path}")
             return csv_path
@@ -346,35 +347,32 @@ class PDFProcessor:
 
 
     def _merge_csvs(self, csv_paths):
-        """Handle empty results gracefully"""
+        """Merge all page CSVs into a single file without page column"""
         if not csv_paths:
-            logger.error("No CSV files created - no tables detected")
             return None
-
-        try:
-            merged_path = os.path.join(Config.OUTPUT_DIR, "merged_results.csv")
-            with open(merged_path, 'w', newline='', encoding='utf-8') as merged_file:
-                writer = csv.writer(merged_file)
-                header_written = False
-
-                for csv_path in csv_paths:
-                    if not os.path.exists(csv_path):
-                        continue
-
-                    with open(csv_path, 'r', encoding='utf-8') as f:
-                        reader = csv.reader(f)
+    
+        merged_path = os.path.join(Config.OUTPUT_DIR, "merged_results.csv")
+    
+        with open(merged_path, "w", newline="", encoding="utf-8") as merged_file:
+            writer = csv.writer(merged_file)
+            header_written = False
+    
+            for csv_path in csv_paths:
+                if not os.path.exists(csv_path):
+                    continue
+                
+                with open(csv_path, "r", encoding="utf-8") as f:
+                    reader = csv.reader(f)
+                    try:
+                        header = next(reader)
                         if not header_written:
-                            writer.writerow(["Page"] + next(reader))  # Add page header
+                            writer.writerow(header)  # Write original header
                             header_written = True
-                        else:
-                            next(reader)  # Skip header for subsequent files
-
-                        for row in reader:
-                            writer.writerow(row)
-
-            logger.info(f"Merged CSV created at {merged_path}")
-            return merged_path
-
-        except Exception as e:
-            logger.error(f"CSV merging failed: {str(e)}")
-            return None
+                    except StopIteration:
+                        continue
+                    
+                    for row in reader:
+                        writer.writerow(row)  # Write rows directly
+    
+        logger.info(f"Merged CSV created at {merged_path}")
+        return merged_path
