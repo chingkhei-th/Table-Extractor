@@ -58,9 +58,10 @@ class PDFProcessor:
                 # Save table detection visualization
                 self._save_visualization(image, objects, page_dir)
 
-                # Crop and process tables
+                # Crop table (single return value)
                 cropped_table = self._crop_table(image, objects, page_dir)
                 if cropped_table is None:
+                    logger.warning(f"No table cropped from page {page_num}")
                     continue
 
                 # Recognize table structure
@@ -70,6 +71,11 @@ class PDFProcessor:
                     cropped_table.size,
                     self.recognizer.model.config.id2label
                 )
+
+                # # Adjust coordinates if rotated
+                # if is_rotated:
+                #     cells = self._adjust_rotated_coordinates(cells, cropped_table.size)
+
                 logger.info(f"Detected {len(cells)} table cells")
 
                 # Save structure visualization
@@ -87,6 +93,27 @@ class PDFProcessor:
                 continue
 
         return self._merge_csvs(all_csvs)
+
+    def _adjust_rotated_coordinates(self, cells, image_size):
+        """Adjust coordinates for rotated tables"""
+        adjusted_cells = []
+        img_width, img_height = image_size
+
+        for cell in cells:
+            # Original coordinates
+            xmin, ymin, xmax, ymax = cell["bbox"]
+
+            # Rotate coordinates back 90 degrees (equivalent to rotating image -270)
+            new_xmin = ymin
+            new_ymin = img_width - xmax
+            new_xmax = ymax
+            new_ymax = img_width - xmin
+
+            adjusted_cell = cell.copy()
+            adjusted_cell["bbox"] = [new_xmin, new_ymin, new_xmax, new_ymax]
+            adjusted_cells.append(adjusted_cell)
+
+        return adjusted_cells
 
     def _outputs_to_objects(self, outputs, img_size, id2label=None):
         """Convert model outputs to detected objects dictionary"""
@@ -201,7 +228,6 @@ class PDFProcessor:
         plt.savefig(viz_path, bbox_inches='tight', dpi=150)
         plt.close()
 
-
     def _save_structure_visualization(self, cropped_table, cells, page_dir):
         """Save table structure visualization matching notebook cell 17"""
         plt.figure(figsize=(16, 10))
@@ -236,7 +262,7 @@ class PDFProcessor:
         plt.close()
 
     def _crop_table(self, image, objects, page_dir):
-        """Crop detected table from image"""
+        """Crop table without rotation (returns single Image object)"""
         try:
             table_objects = [obj for obj in objects if obj["label"] in ["table", "table rotated"]]
             if not table_objects:
@@ -256,9 +282,6 @@ class PDFProcessor:
             ]
 
             cropped = image.crop(bbox)
-            if table["label"] == "table rotated":
-                cropped = cropped.rotate(270, expand=True)
-
             crop_path = os.path.join(page_dir, "cropped_table.jpg")
             cropped.save(crop_path)
             return cropped
@@ -268,13 +291,13 @@ class PDFProcessor:
             return None
 
     def _get_cell_coordinates(self, cells):
-        """Extract cell coordinates from recognized table structure"""
+        """Get cell coordinates without rotation adjustment"""
         rows = [cell for cell in cells if cell["label"] == "table row"]
         columns = [cell for cell in cells if cell["label"] == "table column"]
 
-        # Sort rows and columns
-        rows.sort(key=lambda x: x["bbox"][1])
-        columns.sort(key=lambda x: x["bbox"][0])
+        # Sort rows and columns based on original orientation
+        rows.sort(key=lambda x: x["bbox"][1])  # Sort by Y coordinate
+        columns.sort(key=lambda x: x["bbox"][0])  # Sort by X coordinate
 
         cell_coordinates = []
         for row in rows:
@@ -291,7 +314,7 @@ class PDFProcessor:
                     "cell": cell_bbox
                 })
 
-            # Sort cells left-to-right
+            # Sort cells left-to-right based on original X coordinates
             row_cells.sort(key=lambda x: x["column"][0])
             cell_coordinates.append({
                 "row": row["bbox"],
@@ -299,12 +322,12 @@ class PDFProcessor:
                 "cell_count": len(row_cells)
             })
 
-        # Sort rows top-to-bottom
+        # Sort rows top-to-bottom based on original Y coordinates
         cell_coordinates.sort(key=lambda x: x["row"][1])
         return cell_coordinates
 
     def _process_ocr(self, cropped_table, cell_coords, page_num, page_dir):
-        """Perform OCR on table cells and save results"""
+        """Perform OCR with rotation awareness"""
         try:
             data = self.ocr.process_cells(cell_coords, cropped_table)
             csv_path = os.path.join(page_dir, f"page_{page_num}_data.csv")
@@ -321,30 +344,37 @@ class PDFProcessor:
             logger.error(f"OCR processing failed: {str(e)}")
             return None
 
+
     def _merge_csvs(self, csv_paths):
-        """Merge all page CSVs into a single file"""
+        """Handle empty results gracefully"""
         if not csv_paths:
+            logger.error("No CSV files created - no tables detected")
             return None
 
-        merged_path = os.path.join(Config.OUTPUT_DIR, "merged_results.csv")
-        with open(merged_path, 'w', newline='', encoding='utf-8') as merged_file:
-            writer = csv.writer(merged_file)
-            header_written = False
+        try:
+            merged_path = os.path.join(Config.OUTPUT_DIR, "merged_results.csv")
+            with open(merged_path, 'w', newline='', encoding='utf-8') as merged_file:
+                writer = csv.writer(merged_file)
+                header_written = False
 
-            for csv_path in csv_paths:
-                if not os.path.exists(csv_path):
-                    continue
+                for csv_path in csv_paths:
+                    if not os.path.exists(csv_path):
+                        continue
 
-                with open(csv_path, 'r', encoding='utf-8') as f:
-                    reader = csv.reader(f)
-                    if not header_written:
-                        writer.writerow(["Page"] + next(reader))  # Add page header
-                        header_written = True
-                    else:
-                        next(reader)  # Skip header for subsequent files
+                    with open(csv_path, 'r', encoding='utf-8') as f:
+                        reader = csv.reader(f)
+                        if not header_written:
+                            writer.writerow(["Page"] + next(reader))  # Add page header
+                            header_written = True
+                        else:
+                            next(reader)  # Skip header for subsequent files
 
-                    for row in reader:
-                        writer.writerow(row)
+                        for row in reader:
+                            writer.writerow(row)
 
-        logger.info(f"Merged CSV created at {merged_path}")
-        return merged_path
+            logger.info(f"Merged CSV created at {merged_path}")
+            return merged_path
+
+        except Exception as e:
+            logger.error(f"CSV merging failed: {str(e)}")
+            return None
