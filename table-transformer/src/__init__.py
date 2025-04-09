@@ -1,3 +1,0 @@
-"""
-Financial Statement Analysis package.
-"""
