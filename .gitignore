@@ -8,3 +8,8 @@ src/__pycache__/
 .qodo
 
 
+# Testing
+scripts/
+table-transformer/
+table-transformer-v2/
+table-transformer-v4/
