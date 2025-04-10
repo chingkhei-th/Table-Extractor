@@ -1,58 +1,106 @@
-# PDF Table Extraction Project
+# Table Extractor
 
-This project extracts tables from multi-page PDF files, recognizes their structure, and extracts text using OCR. It outputs both individual CSV files for each table and a merged CSV file containing all tables.
+A tool for extracting tables from PDF financial statements using deep learning models.
+
+## Overview
+
+This tool extracts tables from PDF documents using state-of-the-art deep learning models. It uses the Table Transformer (DETR) models from Microsoft for table detection and structure recognition, combined with OCR capabilities to extract tabular data from financial statements.
 
 ## Features
 
-- Process multi-page PDF documents
-- Detect tables in each page using Table Transformer
-- Recognize table structure (rows and columns)
-- Extract text from cells using PaddleOCR
-- Generate CSV files for each table
-- Merge all tables into a single CSV file
-- Visualize detection and recognition results
+- Table detection in PDF documents
+- Table structure recognition
+- OCR for text extraction
+- CSV output generation
+- Visualization of detected tables and structures
 
-## Requirements
+## Installation
 
-Install the required packages:
+### Prerequisites
 
-```bash
-pip install -r requirements.txt
-```
+- Python 3.7+
+- PyTorch
+- CUDA (optional, for GPU acceleration)
+
+### Setup
+
+1. Clone the repository
+2. Install dependencies:
+
+    ```shell
+    uv sync
+    ```
+
+    > Note: you'll need to install [`Astral UV`](https://docs.astral.sh/uv/getting-started/installation/) first if not already installed.
 
 ## Usage
 
-Run the main script with the path to your PDF file:
+### Command Line Interface
+
+The tool can be run from the command line using the `run.py` script:
+
+```shell
+python run.py [options]
+```
+
+### Options
+
+```shell
+--pdf_path PATH             Path to the PDF file
+--output DIR                Output directory (default: ../data/output/table-extractor)
+--dpi DPI                   DPI for PDF to image conversion (default: 200)
+--max-detection-size SIZE   Maximum size for detection model input (default: 800)
+--max-structure-size SIZE   Maximum size for structure model input (default: 1000)
+--crop-padding PADDING      Padding around table crops (default: 10)
+--detection-model MODEL     Detection model name or path (default: microsoft/table-transformer-detection)
+--structure-model MODEL     Structure model name or path (default: microsoft/table-structure-recognition-v1.1-all)
+--detection-threshold FLOAT Detection confidence threshold (default: 0.5)
+--ocr-lang LANG             OCR language (default: en)
+```
+
+### Example
 
 ```bash
-python pdf_to_csv.py --pdf_path "your_document.pdf" --output_dir "output" --visualize
+python run.py --pdf_path ../data/financial_statement.pdf --output ../data/output/results --dpi 300
 ```
 
-### Arguments:
+## Configuration
 
-- `--pdf_path`: Path to the PDF file (required)
-- `--output_dir`: Directory to save output files (default: "output")
-- `--detection_threshold`: Threshold for table detection (default: 0.5)
-- `--crop_padding`: Padding for table crops (default: 0)
-- `--visualize`: Save visualization images (optional flag)
+The tool uses a configuration class `TableExtractorConfig` that can be customized. Default values are:
 
-## Output
+- Input PDF path: `../data/test-input/Test_statement.pdf`
+- Output directory: `../data/output/table-extractor`
+- PDF DPI: 400
+- Maximum detection size: 800
+- Maximum structure size: 1000
+- Crop padding: 10
+- Detection model: `microsoft/table-transformer-detection`
+- Structure model: `microsoft/table-structure-recognition-v1.1-all`
+- OCR language: `en`
+- Detection thresholds:
+  - table: 0.5
+  - table rotated: 0.5
+  - no object: 10
 
-The script creates the following directory structure:
+## Output Structure
 
-```
-output/
-├── all_tables.csv                  # Merged CSV with all tables
-├── page_1/
-│   ├── page.jpg                    # Original page image
-│   ├── detected_tables.jpg         # Visualization of detected tables
-│   ├── table_1.csv                 # CSV for first table
-│   ├── table_1_structure.jpg       # Structure visualization
-│   └── table_1_rows.jpg            # Rows visualization
-├── page_2/
-│   └── ...
-└── ...
-```
+The tool creates the following output directories:
+
+- `original/`: Original PDF pages as images
+- `detected/`: Visualizations of detected tables
+- `cropped/`: Cropped table images
+- `structure/`: Visualizations of table structures
+- `csv/`: Extracted table data in CSV format
+
+## Architecture
+
+The system consists of several components:
+
+1. **TableExtractor**: Main class that orchestrates the extraction process
+2. **TableDetectionModel**: Handles table detection in document images
+3. **TableStructureModel**: Recognizes the structure of detected tables
+4. **OCRModel**: Extracts text from table cells
+5. **TemplateColumnDetector**: Detects columns in tables
 
 ## How It Works
 
@@ -64,8 +112,10 @@ output/
 
 ## Model Credits
 
-This project uses the following models:
+This project uses models from the [Microsoft Table Transformer (DETR)](https://github.com/microsoft/table-transformer) project and [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) for optical character recognition.
 
-- [microsoft/table-transformer-detection](https://huggingface.co/microsoft/table-transformer-detection) for table detection
-- [microsoft/table-structure-recognition-v1.1-all](https://huggingface.co/microsoft/table-structure-recognition-v1.1-all) for structure recognition
-- [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) for optical character recognition
+Models with their task:
+
+- [microsoft/table-transformer-detection](https://huggingface.co/microsoft/table-transformer-detection) for table detection.
+- [microsoft/table-structure-recognition-v1.1-all](https://huggingface.co/microsoft/table-structure-recognition-v1.1-all) for structure recognition.
+- [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) for optical character recognition.
