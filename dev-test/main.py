@@ -474,7 +474,7 @@ class TableExtractor:
         print(f"Merged CSV saved to {merged_csv_path}")
         return merged_csv_path
 
-    #  template-based column detection
+    # ==== Column detection ====
     def process_pdf(self, pdf_path):
         """Process a PDF file with improved column detection."""
         # Convert PDF to images
@@ -611,6 +611,7 @@ class TableExtractor:
             print("No tables were found in the PDF.")
             return None
 
+    # ==== Template-based column detection ====
     def extract_column_template(self, image):
         """Extract column structure from the first page to use as a template."""
         # Table detection
@@ -767,6 +768,67 @@ class TableExtractor:
 
         return all_page_data
 
+    def get_template_columns(self, table_image):
+        """Extract column structure to use as a template."""
+        # Apply structure recognition
+        pixel_values = self.structure_transform(table_image).unsqueeze(0).to(self.device)
+    
+        with torch.no_grad():
+            structure_outputs = self.structure_model(pixel_values)
+    
+        # Extract cell structure
+        cells = self.outputs_to_objects(structure_outputs, table_image.size, self.structure_id2label)
+    
+        # Extract just the columns
+        columns = [entry for entry in cells if entry['label'] == 'table column']
+    
+        if not columns:
+            return None
+    
+        # Post-process columns to fix overlaps
+        processed_columns = self.post_process_columns(columns)
+    
+        # Filter duplicate columns
+        filtered_columns = self.filter_duplicate_columns(processed_columns)
+    
+        # Sort columns by x-coordinate
+        filtered_columns.sort(key=lambda x: x['bbox'][0])
+    
+        # Normalize column positions (as ratios of table width)
+        table_width = table_image.width
+        normalized_columns = []
+    
+        for col in filtered_columns:
+            normalized_col = {
+                'x_start_ratio': col['bbox'][0] / table_width,
+                'x_end_ratio': col['bbox'][2] / table_width,
+                'original_bbox': col['bbox']
+            }
+            normalized_columns.append(normalized_col)
+    
+        return normalized_columns
+    
+    def apply_template_columns(self, normalized_columns, table_size):
+        """Apply normalized column template to a table of specific size."""
+        if not normalized_columns:
+            return []
+    
+        table_width, table_height = table_size
+        columns = []
+    
+        for col in normalized_columns:
+            x_start = col['x_start_ratio'] * table_width
+            x_end = col['x_end_ratio'] * table_width
+    
+            column_obj = {
+                'label': 'table column',
+                'score': 0.99,
+                'bbox': [x_start, 0, x_end, table_height]
+            }
+    
+            columns.append(column_obj)
+    
+        return columns
     # ==== Post-Processing Column Detection ====
     def post_process_columns(self, columns, min_gap=5):
         """
