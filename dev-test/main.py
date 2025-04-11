@@ -476,23 +476,130 @@ class TableExtractor:
 
     #  template-based column detection
     def process_pdf(self, pdf_path):
-        """Process a PDF file using first page columns as template for all pages."""
+        """Process a PDF file with improved column detection."""
         # Convert PDF to images
         images = self.convert_pdf_to_images(pdf_path)
 
         # First, process the first page to get column structure
         print(f"\nProcessing first page to extract column structure template")
         first_page = images[0]
-        template_columns = self.extract_column_template(first_page)
 
-        # Process each page with the template columns
+        # Extract tables from first page
+        pixel_values = self.detection_transform(first_page).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            outputs = self.detection_model(pixel_values)
+        first_page_objects = self.outputs_to_objects(outputs, first_page.size, self.detection_id2label)
+
+        # If no tables on first page, use normal processing
+        if not first_page_objects:
+            print("No tables on first page. Falling back to regular processing.")
+            return self.process_pdf(pdf_path)
+
+        # Get first page table
+        first_page_tables = self.objects_to_crops(first_page, first_page_objects)
+        if not first_page_tables:
+            return self.process_pdf(pdf_path)
+
+        first_table = first_page_tables[0]['image']
+
+        # Extract column structure from first page
+        template_columns = self.get_template_columns(first_table)
+
+        if not template_columns:
+            print("Could not extract template columns. Using whitespace analysis.")
+            template_columns = self.detect_columns_by_whitespace(first_table)
+
+        # Process each page
         all_data = []
 
         for page_idx, image in enumerate(tqdm(images, desc="Processing pages")):
             page_num = page_idx + 1
             print(f"\nProcessing page {page_num}/{len(images)}")
 
-            page_data = self.process_image_with_template(image, page_num, template_columns)
+            # Detect tables on this page
+            pixel_values = self.detection_transform(image).unsqueeze(0).to(self.device)
+            with torch.no_grad():
+                outputs = self.detection_model(pixel_values)
+            objects = self.outputs_to_objects(outputs, image.size, self.detection_id2label)
+
+            # Save original image
+            orig_image_path = os.path.join(self.output_dir, "original", f"page_{page_num}.jpg")
+            image.save(orig_image_path)
+
+            if not objects:
+                print(f"No tables detected on page {page_num}")
+                all_data.append(None)
+                continue
+
+            # Visualize detected tables
+            detected_image = self.visualize_detected_tables(image, objects)
+            detected_image_path = os.path.join(self.output_dir, "detected", f"page_{page_num}_detected.jpg")
+            detected_image.save(detected_image_path)
+
+            # Process tables on this page
+            page_data = []
+
+            for table_idx, table_crop_info in enumerate(self.objects_to_crops(image, objects)):
+                cropped_table = table_crop_info['image']
+                cropped_table_path = os.path.join(self.output_dir, "cropped", f"page_{page_num}_table_{table_idx}.jpg")
+                cropped_table.save(cropped_table_path)
+
+                # For first page, use structure model results
+                if page_idx == 0:
+                    # Use structure model to detect both rows and columns
+                    pixel_values = self.structure_transform(cropped_table).unsqueeze(0).to(self.device)
+                    with torch.no_grad():
+                        structure_outputs = self.structure_model(pixel_values)
+                    cells = self.outputs_to_objects(structure_outputs, cropped_table.size, self.structure_id2label)
+                else:
+                    # For subsequent pages, use structure model only for rows
+                    pixel_values = self.structure_transform(cropped_table).unsqueeze(0).to(self.device)
+                    with torch.no_grad():
+                        structure_outputs = self.structure_model(pixel_values)
+                    cells = self.outputs_to_objects(structure_outputs, cropped_table.size, self.structure_id2label)
+
+                    # Extract rows
+                    rows = [entry for entry in cells if entry['label'] == 'table row']
+
+                    # Replace detected columns with template columns adjusted to this table's size
+                    cols = self.apply_template_columns(template_columns, cropped_table.size)
+
+                    # Remove existing columns from cells
+                    cells = [cell for cell in cells if cell['label'] != 'table column']
+
+                    # Add template columns to cells
+                    cells.extend(cols)
+
+                # Post-process columns to fix overlaps
+                columns = [cell for cell in cells if cell['label'] == 'table column']
+                processed_columns = self.post_process_columns(columns)
+
+                # Replace columns in cells with processed ones
+                cells = [cell for cell in cells if cell['label'] != 'table column']
+                cells.extend(processed_columns)
+
+                # Visualize structure with processed columns
+                structure_image = self.visualize_table_structure(cropped_table, cells)
+                structure_image_path = os.path.join(self.output_dir, "structure", f"page_{page_num}_table_{table_idx}_structure.jpg")
+                structure_image.save(structure_image_path)
+
+                # Get cell coordinates
+                cell_coordinates = self.get_cell_coordinates_by_row(cells)
+
+                if not cell_coordinates:
+                    print(f"No rows/columns detected in table {table_idx} on page {page_num}")
+                    continue
+
+                # Apply OCR
+                table_data, table_columns = self.apply_ocr(cropped_table, cell_coordinates)
+
+                # Save individual table CSV
+                table_csv_path = os.path.join(self.output_dir, "csv", f"page_{page_num}_table_{table_idx}.csv")
+                self.save_csv(table_data, table_csv_path)
+
+                # Add to page data
+                page_data.append((table_data, table_columns))
+
             all_data.append(page_data)
 
         # Merge all tables into a single CSV
@@ -659,6 +766,347 @@ class TableExtractor:
             all_page_data.append((table_data, table_columns))
 
         return all_page_data
+
+    # ==== Post-Processing Column Detection ====
+    def post_process_columns(self, columns, min_gap=5):
+        """
+        Post-process detected columns to fix overlaps and maintain consistency.
+
+        Args:
+            columns: List of column objects with bboxes
+            min_gap: Minimum gap between columns in pixels
+
+        Returns:
+            List of corrected column objects
+        """
+        if not columns or len(columns) <= 1:
+            return columns
+
+        # Sort columns by x-coordinate
+        columns.sort(key=lambda x: x['bbox'][0])
+
+        # Fix overlapping columns
+        corrected_columns = [columns[0]]
+
+        for i in range(1, len(columns)):
+            current_col = columns[i]
+            previous_col = corrected_columns[-1]
+
+            # Check for overlap
+            if current_col['bbox'][0] <= previous_col['bbox'][2] + min_gap:
+                # Take the average of the overlapping boundaries
+                midpoint = (previous_col['bbox'][2] + current_col['bbox'][0]) / 2
+
+                # Update previous column's right boundary
+                previous_col['bbox'][2] = midpoint - min_gap/2
+
+                # Update current column's left boundary
+                current_col['bbox'][0] = midpoint + min_gap/2
+
+            corrected_columns.append(current_col)
+
+        return corrected_columns
+
+    def filter_duplicate_columns(self, columns, similarity_threshold=0.9):
+        """
+        Filter out duplicate columns that are very similar to each other.
+
+        Args:
+            columns: List of column objects with bboxes
+            similarity_threshold: Threshold for considering columns as duplicates
+
+        Returns:
+            List of filtered column objects
+        """
+        if not columns or len(columns) <= 1:
+            return columns
+
+        # Sort columns by x-coordinate
+        columns.sort(key=lambda x: x['bbox'][0])
+
+        filtered_columns = [columns[0]]
+
+        for i in range(1, len(columns)):
+            current_col = columns[i]
+            previous_col = filtered_columns[-1]
+
+            # Calculate overlap percentage
+            x_overlap = min(current_col['bbox'][2], previous_col['bbox'][2]) - max(current_col['bbox'][0], previous_col['bbox'][0])
+
+            if x_overlap <= 0:
+                # No overlap, add the column
+                filtered_columns.append(current_col)
+                continue
+
+            # Calculate overlap ratio relative to the smaller column width
+            width1 = previous_col['bbox'][2] - previous_col['bbox'][0]
+            width2 = current_col['bbox'][2] - current_col['bbox'][0]
+            min_width = min(width1, width2)
+
+            overlap_ratio = x_overlap / min_width
+
+            # If overlap ratio is above threshold, consider as duplicate
+            if overlap_ratio < similarity_threshold:
+                filtered_columns.append(current_col)
+
+        return filtered_columns
+
+    def apply_column_consistency(self, pages_columns):
+        """
+        Apply consistency to columns across pages by clustering column positions.
+
+        Args:
+            pages_columns: List of columns from each page
+
+        Returns:
+            Consistent columns to use across all pages
+        """
+        import numpy as np
+        from sklearn.cluster import DBSCAN
+
+        # Extract column boundaries from all pages
+        all_left_boundaries = []
+        all_right_boundaries = []
+
+        for page_cols in pages_columns:
+            if not page_cols:
+                continue
+
+            for col in page_cols:
+                all_left_boundaries.append(col['bbox'][0])
+                all_right_boundaries.append(col['bbox'][2])
+
+        # If no columns found, return empty list
+        if not all_left_boundaries:
+            return []
+
+        # Cluster left boundaries
+        left_boundaries = np.array(all_left_boundaries).reshape(-1, 1)
+        left_clustering = DBSCAN(eps=20, min_samples=2).fit(left_boundaries)
+        left_labels = left_clustering.labels_
+
+        # Cluster right boundaries
+        right_boundaries = np.array(all_right_boundaries).reshape(-1, 1)
+        right_clustering = DBSCAN(eps=20, min_samples=2).fit(right_boundaries)
+        right_labels = right_clustering.labels_
+
+        # Get cluster centers for left boundaries
+        unique_left_labels = set(left_labels)
+        left_centers = []
+
+        for label in unique_left_labels:
+            if label == -1:  # Skip noise
+                continue
+            mask = left_labels == label
+            center = np.mean(left_boundaries[mask])
+            left_centers.append(center)
+
+        # Get cluster centers for right boundaries
+        unique_right_labels = set(right_labels)
+        right_centers = []
+
+        for label in unique_right_labels:
+            if label == -1:  # Skip noise
+                continue
+            mask = right_labels == label
+            center = np.mean(right_boundaries[mask])
+            right_centers.append(center)
+
+        # Sort centers
+        left_centers.sort()
+        right_centers.sort()
+
+        # Create consistent columns
+        consistent_columns = []
+
+        # Handle case where we have different numbers of left and right boundaries
+        min_length = min(len(left_centers), len(right_centers))
+
+        for i in range(min_length):
+            consistent_columns.append({
+                'label': 'table column',
+                'score': 0.99,
+                'bbox': [left_centers[i], 0, right_centers[i], 1000]  # Height will be adjusted later
+            })
+
+        return consistent_columns
+    # ========
+
+    # ==== Rule-based column detection
+    def detect_columns_by_whitespace(self, image, min_gap_width=10, min_column_width=20):
+        """
+        Detect table columns using whitespace analysis.
+
+        Args:
+            image: PIL Image of the table
+            min_gap_width: Minimum width of whitespace to consider as column separator
+            min_column_width: Minimum width of a column
+
+        Returns:
+            List of column objects with bboxes
+        """
+        # Convert image to grayscale numpy array
+        img_array = np.array(image.convert('L'))
+
+        # Get image height and width
+        height, width = img_array.shape
+
+        # Calculate vertical projection (sum along y-axis)
+        # Higher values indicate more black pixels (text)
+        vertical_projection = np.sum(255 - img_array, axis=0)
+
+        # Normalize projection
+        if np.max(vertical_projection) > 0:
+            vertical_projection = vertical_projection / np.max(vertical_projection)
+
+        # Find column separators (gaps with minimal text)
+        gaps = []
+        in_gap = False
+        gap_start = 0
+
+        for x in range(width):
+            if vertical_projection[x] < 0.05:  # Threshold for whitespace
+                if not in_gap:
+                    in_gap = True
+                    gap_start = x
+            else:
+                if in_gap:
+                    in_gap = False
+                    gap_end = x
+                    if gap_end - gap_start >= min_gap_width:
+                        gaps.append((gap_start, gap_end))
+
+        # Add final gap if needed
+        if in_gap:
+            gaps.append((gap_start, width))
+
+        # Convert gaps to columns
+        columns = []
+
+        # Handle the case when no gaps are found
+        if not gaps:
+            return [{
+                'label': 'table column',
+                'score': 0.99,
+                'bbox': [0, 0, width, height]
+            }]
+
+        # First column starts at x=0
+        col_start = 0
+
+        for gap_start, gap_end in gaps:
+            # Column ends at the start of the gap
+            col_end = gap_start
+
+            # Check if column is wide enough
+            if col_end - col_start >= min_column_width:
+                columns.append({
+                    'label': 'table column',
+                    'score': 0.99,
+                    'bbox': [col_start, 0, col_end, height]
+                })
+
+            # Next column starts at the end of the gap
+            col_start = gap_end
+
+        # Add the last column if needed
+        if col_start < width and width - col_start >= min_column_width:
+            columns.append({
+                'label': 'table column',
+                'score': 0.99,
+                'bbox': [col_start, 0, width, height]
+            })
+
+        return columns
+
+    def detect_columns_by_text_alignment(self, image, ocr_results):
+        """
+        Detect table columns by analyzing text alignment patterns.
+
+        Args:
+            image: PIL Image of the table
+            ocr_results: Text detection results from OCR
+
+        Returns:
+            List of column objects with bboxes
+        """
+        # Extract left and right text boundaries
+        left_bounds = []
+        right_bounds = []
+
+        for result in ocr_results:
+            # Extract bounding boxes of text from OCR results
+            # This depends on the specific OCR output format
+            for line in result:
+                if line:
+                    for item in line:
+                        if len(item) >= 2:
+                            # Get coordinates - format depends on PaddleOCR output
+                            coords = item[0]
+                            # Find leftmost and rightmost x coordinates
+                            x_coords = [point[0] for point in coords]
+                            left_bounds.append(min(x_coords))
+                            right_bounds.append(max(x_coords))
+
+        # If no text found, return empty
+        if not left_bounds:
+            return []
+
+        # Cluster left bounds to find column starts
+        from sklearn.cluster import DBSCAN
+
+        # Convert to numpy arrays for clustering
+        left_array = np.array(left_bounds).reshape(-1, 1)
+
+        # Perform clustering
+        clustering = DBSCAN(eps=20, min_samples=2).fit(left_array)
+        labels = clustering.labels_
+
+        # Extract cluster centers
+        unique_labels = set(labels)
+        centers = []
+
+        for label in unique_labels:
+            if label == -1:  # Skip noise
+                continue
+            mask = labels == label
+            center = np.mean(left_array[mask])
+            centers.append(center)
+
+        # Sort centers
+        centers.sort()
+
+        # Create column objects
+        columns = []
+        height = image.height
+
+        # Handle first column
+        if centers:
+            if centers[0] > 20:  # If first center is not at the left edge
+                columns.append({
+                    'label': 'table column',
+                    'score': 0.99,
+                    'bbox': [0, 0, centers[0] - 10, height]
+                })
+
+        # Create columns between centers
+        for i in range(len(centers) - 1):
+            columns.append({
+                'label': 'table column',
+                'score': 0.99,
+                'bbox': [centers[i], 0, centers[i+1] - 10, height]
+            })
+
+        # Add last column
+        if centers:
+            columns.append({
+                'label': 'table column',
+                'score': 0.99,
+                'bbox': [centers[-1], 0, image.width, height]
+            })
+
+        return columns
+    # ========
 
 def main():
     parser = argparse.ArgumentParser(description='Extract tables from PDF documents')
