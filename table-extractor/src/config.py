@@ -16,7 +16,7 @@ class TableExtractorConfig:
     # Image processing configuration
     max_detection_size: int = 800
     max_structure_size: int = 1000
-    crop_padding: int = 10
+    crop_padding: int = 5
     pdf_dpi: int = 400  # DPI for PDF to image conversion
 
     # Model configuration
@@ -33,7 +33,7 @@ class TableExtractorConfig:
         """Initialize default values after initialization."""
         if self.detection_class_thresholds is None:
             self.detection_class_thresholds = {
-                "table": 0.5,
+                "table": 0.9,
                 "table rotated": 0.5,
                 "no object": 10,
             }
