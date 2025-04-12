@@ -2,8 +2,11 @@ import os
 import cv2
 import numpy as np
 import pdf2image
+import pandas as pd
+import csv
 from typing import List, Tuple, Dict, Any, Optional
 import sys
+from paddleocr import PaddleOCR
 
 # Add script directory to path
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'script'))
@@ -20,6 +23,10 @@ class TableExtractor:
         """
         self.config = config or {}
         self.detector = TableDetector(config=self.config)
+        # Initialize PaddleOCR
+        use_gpu = self.config.get('use_gpu', False)
+        lang = self.config.get('lang', 'en')
+        self.ocr = PaddleOCR(use_angle_cls=True, lang=lang, use_gpu=use_gpu)
 
     def load_pdf(self, pdf_path: str) -> List[np.ndarray]:
         """
@@ -74,7 +81,7 @@ class TableExtractor:
         return table_regions
 
     def crop_tables(self, images: List[np.ndarray],
-                   table_regions: Dict[int, List[Tuple[int, int, int, int]]]) -> Dict[int, List[np.ndarray]]:
+                   table_regions: Dict[int, List[Tuple[int, int, int, int]]]) -> Dict[int, List[Tuple[np.ndarray, Tuple[int, int, int, int]]]]:
         """
         Crop detected tables from images
 
@@ -83,7 +90,7 @@ class TableExtractor:
             table_regions (Dict[int, List[Tuple[int, int, int, int]]]): Dictionary mapping page numbers to table regions
 
         Returns:
-            Dict[int, List[np.ndarray]]: Dictionary mapping page numbers to lists of cropped table images
+            Dict[int, List[Tuple[np.ndarray, Tuple[int, int, int, int]]]]: Dictionary mapping page numbers to lists of (cropped table images, regions)
         """
         cropped_tables = {}
 
@@ -104,7 +111,7 @@ class TableExtractor:
 
                 # Crop the table
                 cropped = img[y_min:y_max, x_min:x_max]
-                page_tables.append(cropped)
+                page_tables.append((cropped, (x_min, y_min, x_max-x_min, y_max-y_min)))
 
             cropped_tables[page_num] = page_tables
 
@@ -183,6 +190,112 @@ class TableExtractor:
 
         return result
 
+    def extract_cell_text(self, table_img: np.ndarray, rows: List[int], cols: List[int]) -> List[List[str]]:
+        """
+        Extract text from table cells using OCR
+
+        Args:
+            table_img (np.ndarray): Table image
+            rows (List[int]): Row positions
+            cols (List[int]): Column positions
+
+        Returns:
+            List[List[str]]: 2D array of cell text
+        """
+        # Add boundary rows and columns
+        all_rows = [0] + rows + [table_img.shape[0]]
+        all_cols = [0] + cols + [table_img.shape[1]]
+
+        # Initialize table data
+        table_data = []
+
+        # Process each row
+        for i in range(len(all_rows) - 1):
+            row_data = []
+            y1 = all_rows[i]
+            y2 = all_rows[i + 1]
+
+            for j in range(len(all_cols) - 1):
+                x1 = all_cols[j]
+                x2 = all_cols[j + 1]
+
+                # Extract cell image
+                cell_img = table_img[y1:y2, x1:x2]
+
+                # Skip very small cells (likely noise)
+                if cell_img.shape[0] < 5 or cell_img.shape[1] < 5:
+                    row_data.append("")
+                    continue
+
+                # Run OCR on the cell
+                result = self.ocr.ocr(cell_img, cls=True)
+
+                # Extract text (handle empty results)
+                if result and result[0]:
+                    # PaddleOCR returns a list for each text region
+                    cell_text = " ".join([line[1][0] for line in result[0] if line[1][0].strip()])
+                    row_data.append(cell_text)
+                else:
+                    row_data.append("")
+
+            table_data.append(row_data)
+
+        return table_data
+
+    def save_as_csv(self, table_data: List[List[str]], output_path: str) -> None:
+        """
+        Save table data as CSV
+
+        Args:
+            table_data (List[List[str]]): 2D array of cell text
+            output_path (str): Path to save the CSV file
+        """
+        with open(output_path, 'w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.writer(csvfile)
+            for row in table_data:
+                writer.writerow(row)
+
+        print(f"Saved CSV: {output_path}")
+
+    def merge_csv_files(self, csv_dir: str, output_path: str) -> None:
+        """
+        Merge all CSV files in a directory in page order
+
+        Args:
+            csv_dir (str): Directory containing CSV files
+            output_path (str): Path to save the merged CSV file
+        """
+        # Get all CSV files in the directory
+        csv_files = [f for f in os.listdir(csv_dir) if f.endswith('.csv')]
+
+        # Sort by page number and table index
+        def get_page_table(filename):
+            # Extract page number and table index from filename format "page_X_table_Y.csv"
+            parts = filename.split('_')
+            page_num = int(parts[1])
+            table_num = int(parts[3].split('.')[0])
+            return (page_num, table_num)
+
+        csv_files.sort(key=get_page_table)
+
+        # Merge all CSV files
+        merged_data = []
+        for csv_file in csv_files:
+            file_path = os.path.join(csv_dir, csv_file)
+            df = pd.read_csv(file_path, header=None)
+            # Add a separator row between tables
+            if merged_data:
+                merged_data.append(pd.Series([''] * df.shape[1]))
+            merged_data.append(df)
+
+        # Concatenate all dataframes
+        if merged_data:
+            merged_df = pd.concat(merged_data, ignore_index=True)
+            merged_df.to_csv(output_path, index=False, header=False)
+            print(f"Merged CSV saved to: {output_path}")
+        else:
+            print("No CSV files found to merge.")
+
     def process_pdf(self, pdf_path: str, output_dir: str) -> None:
         """
         Process a PDF file and extract tables
@@ -191,28 +304,64 @@ class TableExtractor:
             pdf_path (str): Path to the PDF file
             output_dir (str): Directory to save the output
         """
-        # Create output directory if it doesn't exist
+        # Create output directory structure
         os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(os.path.join(output_dir, 'cropped'), exist_ok=True)
+        os.makedirs(os.path.join(output_dir, 'csv'), exist_ok=True)
+        os.makedirs(os.path.join(output_dir, 'detected'), exist_ok=True)
+        os.makedirs(os.path.join(output_dir, 'original'), exist_ok=True)
+        os.makedirs(os.path.join(output_dir, 'structure'), exist_ok=True)
 
         # Load PDF
         images = self.load_pdf(pdf_path)
 
+        # Save original images
+        for i, img in enumerate(images):
+            original_path = os.path.join(output_dir, 'original', f"page_{i}.png")
+            cv2.imwrite(original_path, img)
+
         # Detect tables
         table_regions = self.detect_tables(images)
 
-        # Crop tables
+        # Process each page with tables
         cropped_tables = self.crop_tables(images, table_regions)
 
         # Process each table
         for page_num, tables in cropped_tables.items():
-            for table_idx, table_img in enumerate(tables):
+            page_img = images[page_num].copy()
+
+            # Draw detected regions on the original image
+            for i, (table_img, region) in enumerate(tables):
+                x, y, w, h = region
+                # Draw rectangle around table
+                cv2.rectangle(page_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
+                # Save cropped table
+                cropped_path = os.path.join(output_dir, 'cropped', f"page_{page_num}_table_{i}.png")
+                cv2.imwrite(cropped_path, table_img)
+
                 # Detect rows and columns
                 rows, cols = self.detect_grid(table_img)
 
-                # Draw grid
+                # Draw grid lines on the table
                 grid_img = self.draw_grid(table_img, rows, cols)
 
-                # Save output
-                output_path = os.path.join(output_dir, f"page_{page_num}_table_{table_idx}.png")
-                cv2.imwrite(output_path, grid_img)
-                print(f"Saved table: {output_path}")
+                # Save table with grid structure
+                structure_path = os.path.join(output_dir, 'structure', f"page_{page_num}_table_{i}.png")
+                cv2.imwrite(structure_path, grid_img)
+
+                # Extract text from cells
+                table_data = self.extract_cell_text(table_img, rows, cols)
+
+                # Save as CSV
+                csv_path = os.path.join(output_dir, 'csv', f"page_{page_num}_table_{i}.csv")
+                self.save_as_csv(table_data, csv_path)
+
+            # Save image with detected tables
+            detected_path = os.path.join(output_dir, 'detected', f"page_{page_num}.png")
+            cv2.imwrite(detected_path, page_img)
+
+        # Merge all CSV files
+        csv_dir = os.path.join(output_dir, 'csv')
+        merged_csv_path = os.path.join(output_dir, 'merged_table.csv')
+        self.merge_csv_files(csv_dir, merged_csv_path)

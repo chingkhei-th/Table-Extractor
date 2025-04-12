@@ -13,9 +13,11 @@ def main():
     parser.add_argument('--morph-close', action='store_true', help='Apply morphological closing')
     parser.add_argument('--no-morph-close', dest='morph_close', action='store_false')
     parser.add_argument('--crop-padding', type=int, default=1, help='Padding around cropped tables')
+    parser.add_argument('--lang', default='en', help='Language for OCR (default: en)')
+    parser.add_argument('--use-gpu', action='store_true', help='Use GPU for OCR if available')
 
     # Set defaults
-    parser.set_defaults(denoise=True, morph_close=True)
+    parser.set_defaults(denoise=True, morph_close=True, use_gpu=False)
 
     # Parse arguments
     args = parser.parse_args()
@@ -30,7 +32,9 @@ def main():
         'dpi': args.dpi,
         'denoise': args.denoise,
         'morph_close': args.morph_close,
-        'crop_padding': args.crop_padding
+        'crop_padding': args.crop_padding,
+        'lang': args.lang,
+        'use_gpu': args.use_gpu
     }
 
     # Create the TableExtractor
