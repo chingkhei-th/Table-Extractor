@@ -240,7 +240,71 @@ class TableExtractor:
 
             table_data.append(row_data)
 
+        # Trim empty rows and columns
+        table_data = self._trim_table_data(table_data)
+
         return table_data
+
+    def _trim_table_data(self, table_data: List[List[str]]) -> List[List[str]]:
+        """
+        Remove empty rows and columns from the table data
+
+        Args:
+            table_data (List[List[str]]): Original table data with possible empty rows/columns
+
+        Returns:
+            List[List[str]]: Trimmed table data
+        """
+        if not table_data or not table_data[0]:
+            return table_data
+
+        # Ensure all rows have the same number of columns
+        max_cols = max(len(row) for row in table_data)
+        table_data = [row + [''] * (max_cols - len(row)) for row in table_data]
+
+        # Find first and last non-empty rows
+        first_row = 0
+        last_row = len(table_data) - 1
+
+        # Find first non-empty row
+        for i, row in enumerate(table_data):
+            if any(cell.strip() for cell in row):
+                first_row = i
+                break
+
+        # Find last non-empty row
+        for i in range(len(table_data) - 1, -1, -1):
+            if any(cell.strip() for cell in table_data[i]):
+                last_row = i
+                break
+
+        # If no content rows found, return a single empty row
+        if first_row > last_row:
+            return [[]]
+
+        # Find first and last non-empty columns
+        first_col = 0
+        last_col = max_cols - 1
+
+        # Find first non-empty column
+        for j in range(max_cols):
+            if any(table_data[i][j].strip() for i in range(first_row, last_row + 1)):
+                first_col = j
+                break
+
+        # Find last non-empty column
+        for j in range(max_cols - 1, -1, -1):
+            if any(table_data[i][j].strip() for i in range(first_row, last_row + 1)):
+                last_col = j
+                break
+
+        # Extract the trimmed table
+        trimmed_data = []
+        for i in range(first_row, last_row + 1):
+            row = table_data[i][first_col:last_col + 1]
+            trimmed_data.append(row)
+
+        return trimmed_data
 
     def save_as_csv(self, table_data: List[List[str]], output_path: str) -> None:
         """
@@ -250,9 +314,13 @@ class TableExtractor:
             table_data (List[List[str]]): 2D array of cell text
             output_path (str): Path to save the CSV file
         """
+        # Normalize table data to ensure all rows have the same number of columns
+        max_cols = max(len(row) for row in table_data) if table_data else 0
+        normalized_data = [row + [''] * (max_cols - len(row)) for row in table_data]
+
         with open(output_path, 'w', newline='', encoding='utf-8') as csvfile:
             writer = csv.writer(csvfile)
-            for row in table_data:
+            for row in normalized_data:
                 writer.writerow(row)
 
         print(f"Saved CSV: {output_path}")
@@ -282,16 +350,23 @@ class TableExtractor:
         merged_data = []
         for csv_file in csv_files:
             file_path = os.path.join(csv_dir, csv_file)
-            df = pd.read_csv(file_path, header=None)
-            # Add a separator row between tables
-            if merged_data:
-                merged_data.append(pd.Series([''] * df.shape[1]))
-            merged_data.append(df)
+            # Read CSV without pandas to handle missing/inconsistent headers better
+            with open(file_path, 'r', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                table_data = list(reader)
 
-        # Concatenate all dataframes
+                # Add a separator row between tables if needed
+                if merged_data:
+                    merged_data.append([])  # Add a single empty row as separator
+
+                merged_data.extend(table_data)
+
+        # Write merged data to CSV
         if merged_data:
-            merged_df = pd.concat(merged_data, ignore_index=True)
-            merged_df.to_csv(output_path, index=False, header=False)
+            with open(output_path, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.writer(csvfile)
+                for row in merged_data:
+                    writer.writerow(row)
             print(f"Merged CSV saved to: {output_path}")
         else:
             print("No CSV files found to merge.")
