@@ -7,6 +7,18 @@ import csv
 from typing import List, Tuple, Dict, Any, Optional
 import sys
 from paddleocr import PaddleOCR
+import logging
+from tqdm import tqdm
+from ppocr.utils.logging import get_logger as get_ppocr_logger
+
+# Supress PPocr logs
+from ppocr.utils.logging import get_logger
+import logging
+logger = get_logger()
+logger.setLevel(logging.ERROR)
+
+# logging.disable(logging.DEBUG)
+# logging.disable(logging.WARNING)
 
 # Add script directory to path
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'script'))
@@ -23,10 +35,40 @@ class TableExtractor:
         """
         self.config = config or {}
         self.detector = TableDetector(config=self.config)
+
+        # Configure root logger
+        logging.basicConfig(
+            filename='table_extractor.log',
+            filemode='w',
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            force=True
+        )
+        self.logger = logging.getLogger(__name__)
+
+        # Configure PPOCR logger
+        ppocr_logger = get_ppocr_logger()
+        ppocr_logger.setLevel(logging.INFO)  # Set to INFO to capture PPOCR logs
+
+        # Add file handler to PPOCR logger
+        file_handler = logging.FileHandler('table_extractor.log', mode='w')
+        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        ppocr_logger.addHandler(file_handler)
+
+        # Remove console handlers from PPOCR logger
+        for handler in ppocr_logger.handlers:
+            if isinstance(handler, logging.StreamHandler):
+                ppocr_logger.removeHandler(handler)
+
+        # Initialize progress tracking
+        self.progress_bar = None
+
         # Initialize PaddleOCR
         use_gpu = self.config.get('use_gpu', False)
         lang = self.config.get('lang', 'en')
         self.ocr = PaddleOCR(use_angle_cls=True, lang=lang, use_gpu=use_gpu)
+
+        print(f"Log file will be created at: {os.path.abspath('table_extractor.log')}")
 
     def load_pdf(self, pdf_path: str) -> List[np.ndarray]:
         """
@@ -38,7 +80,7 @@ class TableExtractor:
         Returns:
             List[np.ndarray]: List of page images
         """
-        print(f"Loading PDF: {pdf_path}")
+        self.logger.info(f"Loading PDF: {pdf_path}")
 
         # Convert PDF to images using pdf2image
         dpi = self.config.get('dpi', 300)
@@ -53,7 +95,7 @@ class TableExtractor:
             img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
             images.append(img)
 
-        print(f"Converted {len(images)} pages to images")
+        self.logger.info(f"Converted {len(images)} pages to images")
         return images
 
     def detect_tables(self, images: List[np.ndarray]) -> Dict[int, List[Tuple[int, int, int, int]]]:
@@ -67,16 +109,19 @@ class TableExtractor:
             Dict[int, List[Tuple[int, int, int, int]]]: Dictionary mapping page numbers to table regions
         """
         table_regions = {}
+        self.logger.info("Starting table detection")
 
-        for page_num, img in enumerate(images):
-            # Detect tables on the current page
-            regions = self.detector.detect_tables(img, page_num)
+        with tqdm(total=len(images), desc="Detecting tables", unit="page") as pbar:
+            for page_num, img in enumerate(images):
+                regions = self.detector.detect_tables(img, page_num)
 
-            if regions:
-                table_regions[page_num] = regions
-                print(f"Page {page_num}: {len(regions)} tables detected")
-            else:
-                print(f"Page {page_num}: No tables detected")
+                if regions:
+                    table_regions[page_num] = regions
+                    self.logger.debug(f"Page {page_num}: {len(regions)} tables detected")
+                else:
+                    self.logger.debug(f"Page {page_num}: No tables detected")
+
+                pbar.update(1)
 
         return table_regions
 
@@ -328,6 +373,7 @@ class TableExtractor:
     def merge_csv_files(self, csv_dir: str, output_path: str) -> None:
         """
         Merge CSV files by table structure (number of columns)
+        Treats the first row as header and avoids duplicating headers when merging.
 
         Args:
             csv_dir (str): Directory containing CSV files
@@ -379,13 +425,30 @@ class TableExtractor:
 
             merged_data = []
             filenames = []
+            header = None
 
-            for filename, table_data in file_data_pairs:
-                # Add separator row between tables if needed
-                if merged_data:
-                    merged_data.append([])  # Add a single empty row as separator
+            for i, (filename, table_data) in enumerate(file_data_pairs):
+                if not table_data:
+                    continue
 
-                merged_data.extend(table_data)
+                # For the first table, capture the header and add all data
+                if i == 0:
+                    header = table_data[0]
+                    merged_data.extend(table_data)
+                else:
+                    # For subsequent tables:
+                    # 1. Add separator row if needed
+                    if merged_data:
+                        merged_data.append([])  # Add a single empty row as separator
+
+                    # 2. Check if the current table's header matches the first table's header
+                    if table_data[0] == header:
+                        # Skip the header row if it's the same as the first table's header
+                        merged_data.extend(table_data[1:])
+                    else:
+                        # If the header is different, include the entire table
+                        merged_data.extend(table_data)
+
                 filenames.append(filename)
 
             # Create output filename with structure identifier
@@ -402,8 +465,14 @@ class TableExtractor:
                 for row in merged_data:
                     writer.writerow(row)
 
+
             print(f"Merged {len(file_data_pairs)} tables with {col_count} columns into: {output_file}")
+            print(" ")
             print(f"   Tables included: {', '.join(filenames)}")
+            if len(file_data_pairs) > 1:
+                print("==================================================================================")
+                print(f"   Note: Header from first table was used as the main header")
+                print("==================================================================================")
 
         if not structure_groups:
             print("No CSV files found to merge.")
@@ -424,64 +493,85 @@ class TableExtractor:
                   ├── original/
                   └── structure/
         """
-        # Create output directory structure
-        os.makedirs(output_dir, exist_ok=True)
-        os.makedirs(os.path.join(output_dir, 'cropped'), exist_ok=True)
-        os.makedirs(os.path.join(output_dir, 'csv'), exist_ok=True)
-        os.makedirs(os.path.join(output_dir, 'detected'), exist_ok=True)
-        os.makedirs(os.path.join(output_dir, 'original'), exist_ok=True)
-        os.makedirs(os.path.join(output_dir, 'structure'), exist_ok=True)
+        try:
+            # Create output directory structure
+            os.makedirs(output_dir, exist_ok=True)
+            os.makedirs(os.path.join(output_dir, 'cropped'), exist_ok=True)
+            os.makedirs(os.path.join(output_dir, 'csv'), exist_ok=True)
+            os.makedirs(os.path.join(output_dir, 'detected'), exist_ok=True)
+            os.makedirs(os.path.join(output_dir, 'original'), exist_ok=True)
+            os.makedirs(os.path.join(output_dir, 'structure'), exist_ok=True)
 
-        # Load PDF
-        images = self.load_pdf(pdf_path)
+            # Initialize main progress bar
+            self.progress_bar = tqdm(total=5, desc="Processing PDF")
 
-        # Save original images
-        for i, img in enumerate(images):
-            original_path = os.path.join(output_dir, 'original', f"page_{i}.png")
-            cv2.imwrite(original_path, img)
+            # Load PDF
+            images = self.load_pdf(pdf_path)
+            self.progress_bar.update(1)
 
-        # Detect tables
-        table_regions = self.detect_tables(images)
+            # Save original images
+            with tqdm(total=len(images), desc="Saving originals", leave=False) as pbar:
+                for i, img in enumerate(images):
+                    original_path = os.path.join(output_dir, 'original', f"page_{i}.png")
+                    cv2.imwrite(original_path, img)
+                    pbar.update(1)
+            self.progress_bar.update(1)
 
-        # Process each page with tables
-        cropped_tables = self.crop_tables(images, table_regions)
+            # Detect tables
+            table_regions = self.detect_tables(images)
+            self.progress_bar.update(1)
 
-        # Process each table
-        for page_num, tables in cropped_tables.items():
-            page_img = images[page_num].copy()
+            # Process tables
+            cropped_tables = self.crop_tables(images, table_regions)
+            total_tables = sum(len(tables) for tables in cropped_tables.values())
 
-            # Draw detected regions on the original image
-            for i, (table_img, region) in enumerate(tables):
-                x, y, w, h = region
-                # Draw rectangle around table
-                cv2.rectangle(page_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            with tqdm(total=total_tables, desc="Processing tables", leave=False) as table_pbar:
+                for page_num, tables in cropped_tables.items():
+                    page_img = images[page_num].copy()
 
-                # Save cropped table
-                cropped_path = os.path.join(output_dir, 'cropped', f"page_{page_num}_table_{i}.png")
-                cv2.imwrite(cropped_path, table_img)
+                    # Draw detected regions on the original image
+                    for i, (table_img, region) in enumerate(tables):
+                        x, y, w, h = region
+                        # Draw rectangle around table
+                        cv2.rectangle(page_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-                # Detect rows and columns
-                rows, cols = self.detect_grid(table_img)
+                        # Save cropped table
+                        cropped_path = os.path.join(output_dir, 'cropped', f"page_{page_num}_table_{i}.png")
+                        cv2.imwrite(cropped_path, table_img)
 
-                # Draw grid lines on the table
-                grid_img = self.draw_grid(table_img, rows, cols)
+                        # Detect rows and columns
+                        rows, cols = self.detect_grid(table_img)
 
-                # Save table with grid structure
-                structure_path = os.path.join(output_dir, 'structure', f"page_{page_num}_table_{i}.png")
-                cv2.imwrite(structure_path, grid_img)
+                        # Draw grid lines on the table
+                        grid_img = self.draw_grid(table_img, rows, cols)
 
-                # Extract text from cells
-                table_data = self.extract_cell_text(table_img, rows, cols)
+                        # Save table with grid structure
+                        structure_path = os.path.join(output_dir, 'structure', f"page_{page_num}_table_{i}.png")
+                        cv2.imwrite(structure_path, grid_img)
 
-                # Save as CSV
-                csv_path = os.path.join(output_dir, 'csv', f"page_{page_num}_table_{i}.csv")
-                self.save_as_csv(table_data, csv_path)
+                        # Extract text from cells
+                        table_data = self.extract_cell_text(table_img, rows, cols)
 
-            # Save image with detected tables
-            detected_path = os.path.join(output_dir, 'detected', f"page_{page_num}.png")
-            cv2.imwrite(detected_path, page_img)
+                        # Save as CSV
+                        csv_path = os.path.join(output_dir, 'csv', f"page_{page_num}_table_{i}.csv")
+                        self.save_as_csv(table_data, csv_path)
 
-        # Merge all CSV files
-        csv_dir = os.path.join(output_dir, 'csv')
-        merged_csv_path = os.path.join(output_dir, 'merged_table.csv')
-        self.merge_csv_files(csv_dir, merged_csv_path)
+                        table_pbar.update(1)
+
+                    # Save image with detected tables
+                    detected_path = os.path.join(output_dir, 'detected', f"page_{page_num}.png")
+                    cv2.imwrite(detected_path, page_img)
+            self.progress_bar.update(1)
+
+            # Merge CSV files
+            self.merge_csv_files(os.path.join(output_dir, 'csv'),
+                               os.path.join(output_dir, 'merged_table.csv'))
+            self.progress_bar.update(1)
+
+            self.progress_bar.close()
+            print("\n✅ Processing completed successfully!")
+            self.logger.info("Processing completed successfully")
+
+        except Exception as e:
+            self.logger.error(f"Processing failed: {str(e)}")
+            raise
