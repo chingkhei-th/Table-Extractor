@@ -6,3 +6,4 @@ paddlepaddle>=2.0.0
 paddleocr>=2.0.0
 pandas>=1.1.0
 poppler-utils>=0.1.0
+tqdm
