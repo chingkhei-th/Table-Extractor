@@ -327,11 +327,11 @@ class TableExtractor:
 
     def merge_csv_files(self, csv_dir: str, output_path: str) -> None:
         """
-        Merge all CSV files in a directory in page order
+        Merge CSV files by table structure (number of columns)
 
         Args:
             csv_dir (str): Directory containing CSV files
-            output_path (str): Path to save the merged CSV file
+            output_path (str): Base path to save the merged CSV files
         """
         # Get all CSV files in the directory
         csv_files = [f for f in os.listdir(csv_dir) if f.endswith('.csv')]
@@ -346,29 +346,66 @@ class TableExtractor:
 
         csv_files.sort(key=get_page_table)
 
-        # Merge all CSV files
-        merged_data = []
+        # Group files by table structure (number of columns)
+        structure_groups = {}  # {column_count: [(filename, table_data), ...]}
+
         for csv_file in csv_files:
             file_path = os.path.join(csv_dir, csv_file)
-            # Read CSV without pandas to handle missing/inconsistent headers better
             with open(file_path, 'r', encoding='utf-8') as f:
                 reader = csv.reader(f)
                 table_data = list(reader)
 
-                # Add a separator row between tables if needed
+                # Skip empty tables
+                if not table_data:
+                    continue
+
+                # Get number of columns from the first row
+                # Some rows might have different lengths, so we use the max length of all rows
+                col_count = max(len(row) for row in table_data) if table_data else 0
+
+                if col_count not in structure_groups:
+                    structure_groups[col_count] = []
+
+                structure_groups[col_count].append((csv_file, table_data))
+
+        # Generate merged files for each structure group
+        base_name = os.path.splitext(os.path.basename(output_path))[0]
+        base_dir = os.path.dirname(output_path)
+
+        for col_count, file_data_pairs in structure_groups.items():
+            # Skip empty groups
+            if not file_data_pairs:
+                continue
+
+            merged_data = []
+            filenames = []
+
+            for filename, table_data in file_data_pairs:
+                # Add separator row between tables if needed
                 if merged_data:
                     merged_data.append([])  # Add a single empty row as separator
 
                 merged_data.extend(table_data)
+                filenames.append(filename)
 
-        # Write merged data to CSV
-        if merged_data:
-            with open(output_path, 'w', newline='', encoding='utf-8') as csvfile:
+            # Create output filename with structure identifier
+            if len(structure_groups) > 1:
+                # If there are multiple structure groups, include column count in filename
+                output_file = os.path.join(base_dir, f"{base_name}_{col_count}cols.csv")
+            else:
+                # If there's only one structure group, use the original filename
+                output_file = output_path
+
+            # Write merged data to CSV
+            with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
                 writer = csv.writer(csvfile)
                 for row in merged_data:
                     writer.writerow(row)
-            print(f"Merged CSV saved to: {output_path}")
-        else:
+
+            print(f"Merged {len(file_data_pairs)} tables with {col_count} columns into: {output_file}")
+            print(f"   Tables included: {', '.join(filenames)}")
+
+        if not structure_groups:
             print("No CSV files found to merge.")
 
     def process_pdf(self, pdf_path: str, output_dir: str) -> None:
@@ -378,6 +415,14 @@ class TableExtractor:
         Args:
             pdf_path (str): Path to the PDF file
             output_dir (str): Directory to save the output
+                Structure:
+                - output/
+                  ├── merged_table_Xcols.csv (Multiple files based on structure)
+                  ├── cropped/
+                  ├── csv/
+                  ├── detected/
+                  ├── original/
+                  └── structure/
         """
         # Create output directory structure
         os.makedirs(output_dir, exist_ok=True)
